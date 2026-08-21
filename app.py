@@ -155,6 +155,11 @@ st.markdown(
 )
 
 # ---- Input: file upload + clipboard ----
+if "image_bgr" not in st.session_state:
+    st.session_state.image_bgr = None
+if "upload_key" not in st.session_state:
+    st.session_state.upload_key = 0
+
 col_up, col_paste = st.columns([3, 1])
 
 with col_up:
@@ -162,15 +167,13 @@ with col_up:
         "Chọn ảnh",
         type=["jpg", "jpeg", "png", "webp", "bmp"],
         help="Ảnh bàn cờ hoặc ảnh 1 quân cờ.",
+        key=f"uploader_{st.session_state.upload_key}",
     )
 
 with col_paste:
     st.write("")
     st.write("")
     paste_clicked = st.button("📋 Dán từ clipboard", use_container_width=True)
-
-if "image_bgr" not in st.session_state:
-    st.session_state.image_bgr = None
 
 if paste_clicked:
     clip = ImageGrab.grabclipboard()
@@ -194,8 +197,9 @@ col_run, col_clear, _ = st.columns([1, 1, 4])
 run_btn = col_run.button(
     "🔍 Nhận diện", type="primary", disabled=(image_bgr is None)
 )
-if col_clear.button("🗑️ Xóa ảnh") and image_bgr is not None:
+if col_clear.button("🗑️ Xóa ảnh"):
     st.session_state.image_bgr = None
+    st.session_state.upload_key += 1  # reset uploader
     st.rerun()
 
 # ---- Preview + run ----
