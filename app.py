@@ -15,6 +15,7 @@ import os
 import io
 import tempfile
 from pathlib import Path
+from PIL import ImageGrab
 
 import cv2
 import numpy as np
@@ -134,25 +135,57 @@ st.markdown(
     "Upload ảnh bàn cờ Shogi → AI phát hiện bàn, nhận diện từng quân và vẽ **bounding box**."
 )
 
-uploaded = st.file_uploader(
-    "Chọn ảnh bàn cờ",
-    type=["jpg", "jpeg", "png", "webp", "bmp"],
-    help="Ảnh chụp bàn cờ từ góc nghiêng hoặc thẳng đều được.",
-)
+col_up, col_paste = st.columns([3, 1])
 
-col_run, col_info = st.columns([1, 3])
-run_btn = col_run.button("🔍 Nhận diện", type="primary", disabled=uploaded is None)
+with col_up:
+    uploaded = st.file_uploader(
+        "Chọn ảnh bàn cờ",
+        type=["jpg", "jpeg", "png", "webp", "bmp"],
+        help="Ảnh chụp bàn cờ từ góc nghiêng hoặc thẳng đều được.",
+    )
+
+with col_paste:
+    st.write("")
+    st.write("")
+    paste_clicked = st.button("📋 Dán từ clipboard", use_container_width=True)
+
+# ---- Lưu ảnh vào session_state để không mất khi rerun ----
+if "image_bgr" not in st.session_state:
+    st.session_state.image_bgr = None
+
+if paste_clicked:
+    clip = ImageGrab.grabclipboard()
+    if clip is None:
+        st.warning("Clipboard không có ảnh. Hãy Copy ảnh (Ctrl+C) rồi bấm lại.")
+    else:
+        st.session_state.image_bgr = cv2.cvtColor(
+            np.array(clip.convert("RGB")), cv2.COLOR_RGB2BGR
+        )
+        st.success("Đã lấy ảnh từ clipboard.")
 
 if uploaded is not None:
     file_bytes = np.frombuffer(uploaded.read(), dtype=np.uint8)
-    image_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    decoded = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if decoded is not None:
+        st.session_state.image_bgr = decoded
+
+image_bgr = st.session_state.image_bgr
+
+col_run, col_info = st.columns([1, 3])
+run_btn = col_run.button("🔍 Nhận diện", type="primary", disabled=(image_bgr is None))
+
+if image_bgr is not None:
+    if st.button("🗑️ Xóa ảnh"):
+        st.session_state.image_bgr = None
+        st.rerun()
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     if image_bgr is None:
         st.error("Không đọc được ảnh.")
         st.stop()
 
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     st.subheader("Ảnh gốc")
-    st.image(image_rgb, use_container_width=True)
+    st.image(image_rgb, width='stretch')
 
     if run_btn:
         if not path_a or not path_b:
@@ -199,12 +232,12 @@ if uploaded is not None:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Bàn đã nắn phẳng + bounding box**")
-            st.image(cv2.cvtColor(warped_boxed, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.image(cv2.cvtColor(warped_boxed, cv2.COLOR_BGR2RGB), width='stretch')
         with c2:
             st.markdown("**Ảnh gốc + bounding box**")
-            st.image(cv2.cvtColor(original_boxed, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.image(cv2.cvtColor(original_boxed, cv2.COLOR_BGR2RGB), width='stretch')
 
-        st.subheader("Trạng thái bàn cờ (text)")
+        st.subheader("Trạng thái bàn cờ dạng text")
         text = board_state_to_text(board_state)
         st.code(text, language=None)
 
