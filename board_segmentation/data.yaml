@@ -1,0 +1,3 @@
+train: ../train/images
+val: ../val/images
+names: ['board']

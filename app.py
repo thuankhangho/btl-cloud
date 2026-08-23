@@ -1,354 +1,443 @@
 """
-Shogi Board Recognition – Streamlit Web App
+YOLOv5 & PyTorch Object Detection – FastAPI REST service.
 
-Usage:
-  1. Place model files in ./models/
-       - best.pt
-       - model_b_figure_direction.pt
-  2. pip install -r requirements.txt
-  3. streamlit run app.py
+Endpoints
+---------
+  GET  /                – Trả về file giao diện index.html
+  GET  /health          – health check (+ CUDA availability)
+  GET  /models          – list available weights & config profiles
+  GET  /models/info     – model metadata (class names → proves dataset swap)
+  POST /models/upload   – upload a trained .pt checkpoint into models/
+  POST /predict/image   – detect on an uploaded image → JSON (+ optional
+                          base64 annotated image or direct PNG)
+  POST /predict/video   – frame-by-frame detection → JSON summary (+ optional
+                          annotated video in outputs/)
+  POST /predict/piece   - Phân loại 1 ô cờ Shogi bằng PyTorch Model
+  GET  /outputs/{file}  – download a generated annotated video
+  POST /cache/clear     – drop cached models (after swapping weight files)
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import os
-from collections import Counter
+import tempfile
+import threading
+import time
+import io
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
-import streamlit as st
 import torch
-from PIL import Image, ImageGrab
+import torch.nn as nn
+import torchvision.transforms as T
+from PIL import Image
 
-from pipeline import (
-    load_model_a,
-    load_model_b,
-    analyze_board,
-    draw_boxes_on_warped,
-    draw_boxes_on_original,
-    board_state_to_text,
-    predict_cell,
-    FIGURE_SHORT,
-)
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from pipeline import (Detector, apply_env_overrides, default_config,
+                      deep_merge, load_config)
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths & app setup
 # ---------------------------------------------------------------------------
 APP_DIR = Path(__file__).resolve().parent
 MODELS_DIR = APP_DIR / "models"
-DEFAULT_A = MODELS_DIR / "best.pt"
-DEFAULT_B = MODELS_DIR / "model_b_figure_direction.pt"
+CONFIGS_DIR = APP_DIR / "configs"
+OUTPUTS_DIR = APP_DIR / "outputs"
+DEFAULT_CONFIG = CONFIGS_DIR / "default.yaml"
 
-st.set_page_config(
-    page_title="Shogi Board Recognition",
-    page_icon="♟️",
-    layout="wide",
+for d in (MODELS_DIR, CONFIGS_DIR, OUTPUTS_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(
+    title="Shogi AI Dashboard (YOLOv5 + PyTorch)",
+    description=(
+        "REST API for Object Detection & Image Classification."
+    ),
+    version="2.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Cho phép mọi trang web gọi API này
+    allow_credentials=True,
+    allow_methods=["*"], # Cho phép mọi lệnh POST, GET...
+    allow_headers=["*"],
 )
 
 
-# ---------------------------------------------------------------------------
-# Model cache
-# ---------------------------------------------------------------------------
-@st.cache_resource
-def get_model_a(path_a: str, device: str):
-    return load_model_a(path_a, device=device)
-
-
-@st.cache_resource
-def get_model_b(path_b: str, device: str):
-    return load_model_b(path_b, device=device)
-
-
-def find_model_files():
-    """Search common locations for model weights."""
-    candidates_a = [
-        DEFAULT_A,
-        APP_DIR / "best.pt",
-        Path("/content/uploaded_models/best.pt"),
-        Path("/content/best.pt"),
-        Path("/content/runs/board_corner_seg_uploaded/weights/best.pt"),
-    ]
-    candidates_b = [
-        DEFAULT_B,
-        APP_DIR / "model_b_figure_direction.pt",
-        Path("/content/uploaded_models/model_b_figure_direction.pt"),
-        Path("/content/model_b_figure_direction.pt"),
-    ]
-
-    if Path("/content/runs").exists():
-        for p in Path("/content/runs").glob("board_corner_seg*/weights/best.pt"):
-            candidates_a.append(p)
-
-    path_a = next((str(p) for p in candidates_a if p.exists()), None)
-    path_b = next((str(p) for p in candidates_b if p.exists()), None)
-    return path_a, path_b
-
-
-def encode_png(bgr: np.ndarray) -> bytes:
-    ok, buf = cv2.imencode(".png", bgr)
-    return buf.tobytes() if ok else b""
-
-
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
-st.sidebar.title("⚙️ Cấu hình")
-
-st.sidebar.markdown("### Model files")
-st.sidebar.caption("Upload hoặc đặt file vào thư mục `models/`")
-
-up_a = st.sidebar.file_uploader("Model A – best.pt", type=["pt"], key="up_a")
-up_b = st.sidebar.file_uploader("Model B – model_b_figure_direction.pt", type=["pt"], key="up_b")
-
-if up_a is not None:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = MODELS_DIR / "best.pt"
-    dest.write_bytes(up_a.read())
-    st.sidebar.success(f"Đã lưu {dest.name}")
-    st.cache_resource.clear()
-
-if up_b is not None:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = MODELS_DIR / "model_b_figure_direction.pt"
-    dest.write_bytes(up_b.read())
-    st.sidebar.success(f"Đã lưu {dest.name}")
-    st.cache_resource.clear()
-
-path_a, path_b = find_model_files()
-
-if path_a:
-    st.sidebar.info(f"Model A: `{path_a}`")
-else:
-    st.sidebar.warning("Chưa có best.pt (cần cho chế độ cả bàn)")
-
-if path_b:
-    st.sidebar.info(f"Model B: `{path_b}`")
-else:
-    st.sidebar.error("Chưa có model_b_figure_direction.pt")
-
-device_options = ["cpu"]
-if torch.cuda.is_available():
-    device_options.insert(0, "cuda")
-device = st.sidebar.selectbox("Device", device_options, index=0)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Chế độ")
-mode = st.sidebar.radio(
-    "Chọn chế độ nhận diện",
-    ["Cả bàn cờ (9×9)", "Một quân cờ"],
-    index=0,
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Tham số (chế độ bàn cờ)")
-margin = st.sidebar.slider("Margins (lề lưới)", 5, 80, 35, 5)
-show_empty = st.sidebar.checkbox("Hiện ô trống", value=False)
-conf_threshold = st.sidebar.slider("Ngưỡng conf hiển thị", 0.0, 1.0, 0.0, 0.05)
-
-# ---------------------------------------------------------------------------
-# Main UI
-# ---------------------------------------------------------------------------
-st.title("♟️ Shogi Board Recognition")
-st.markdown(
-    "Upload / dán ảnh → AI nhận diện quân cờ Shogi và vẽ **bounding box**."
-)
-
-# ---- Input: file upload + clipboard ----
-if "image_bgr" not in st.session_state:
-    st.session_state.image_bgr = None
-if "upload_key" not in st.session_state:
-    st.session_state.upload_key = 0
-
-col_up, col_paste = st.columns([3, 1])
-
-with col_up:
-    uploaded = st.file_uploader(
-        "Chọn ảnh",
-        type=["jpg", "jpeg", "png", "webp", "bmp"],
-        help="Ảnh bàn cờ hoặc ảnh 1 quân cờ.",
-        key=f"uploader_{st.session_state.upload_key}",
-    )
-
-with col_paste:
-    st.write("")
-    st.write("")
-    paste_clicked = st.button("📋 Dán từ clipboard", use_container_width=True)
-
-if paste_clicked:
-    clip = ImageGrab.grabclipboard()
-    if clip is None:
-        st.warning("Clipboard không có ảnh. Hãy Copy ảnh (Ctrl+C) rồi bấm lại.")
-    else:
-        st.session_state.image_bgr = cv2.cvtColor(
-            np.array(clip.convert("RGB")), cv2.COLOR_RGB2BGR
+# ===========================================================================
+# 1. KHỞI TẠO MODEL B (PYTORCH - ĐỌC QUÂN CỜ)
+# ===========================================================================
+class MixedClassifier(nn.Module):
+    def __init__(self, num_figures, num_directions=2):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(), nn.MaxPool2d(2),
+            nn.AdaptiveAvgPool2d(1),
         )
-        st.success("Đã lấy ảnh từ clipboard.")
+        self.fc_figure = nn.Linear(128, num_figures)
+        self.fc_direction = nn.Linear(128, num_directions)
 
-if uploaded is not None:
-    file_bytes = np.frombuffer(uploaded.read(), dtype=np.uint8)
-    decoded = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if decoded is not None:
-        st.session_state.image_bgr = decoded
+    def forward(self, x):
+        feat = self.backbone(x).flatten(1)
+        return self.fc_figure(feat), self.fc_direction(feat)
 
-image_bgr = st.session_state.image_bgr
+device_b = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model_b = None
+try:
+    # 8 loại quân cờ, 3 hướng (Trống, Mình, Địch)
+    model_b = MixedClassifier(num_figures=8, num_directions=3).to(device_b)
+    model_b.load_state_dict(torch.load(MODELS_DIR / "piece_detection.pt", map_location=device_b, weights_only=True))
+    model_b.eval()
+    print("Đã nạp thành công model piece_detection.pt")
+except Exception as e:
+    print("Cảnh báo model (Chưa nạp được hoặc sai tham số):", e)
 
-col_run, col_clear, _ = st.columns([1, 1, 4])
-run_btn = col_run.button(
-    "🔍 Nhận diện", type="primary", disabled=(image_bgr is None)
-)
-if col_clear.button("🗑️ Xóa ảnh"):
-    st.session_state.image_bgr = None
-    st.session_state.upload_key += 1  # reset uploader
-    st.rerun()
+transform_b = T.Compose([
+    T.Resize((100, 100)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+])
 
-# ---- Preview + run ----
-if image_bgr is None:
-    st.info("👆 Upload ảnh hoặc dán từ clipboard để bắt đầu.")
-    st.markdown(
-        """
-### Hướng dẫn
-1. Đặt / upload **best.pt** (Model A) và **model_b_figure_direction.pt** (Model B) ở sidebar.
-2. Chọn chế độ:
-   - **Cả bàn cờ (9×9)** — cần cả 2 model
-   - **Một quân cờ** — chỉ cần Model B
-3. Upload hoặc **Dán từ clipboard** (Ctrl+C ảnh trước).
-4. Bấm **Nhận diện**.
-"""
-    )
-    st.stop()
+FIGURE_MAP = {0: 'Trống', 1: 'Tướng', 2: 'Xe', 3: 'Vàng', 4: 'Bạc', 5: 'Mã', 6: 'Hương xa', 7: 'Tốt'}
+DIR_MAP = {0: 'Trống', 1: 'Của mình', 2: 'Của địch'}
 
-image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-st.subheader("Ảnh đầu vào")
-if mode == "Một quân cờ":
-    st.image(image_rgb, width=240)
-else:
-    st.image(image_rgb, use_container_width=True)
 
-if not run_btn:
-    st.caption("Bấm **Nhận diện** để chạy AI.")
-    st.stop()
+# ---------------------------------------------------------------------------
+# 2. KHỞI TẠO MODEL A (YOLOV5) & CACHE
+# ---------------------------------------------------------------------------
+_detectors: Dict[str, Detector] = {}
+_cache_lock = threading.Lock()
+MAX_CACHED_MODELS = int(os.getenv("MAX_CACHED_MODELS", "4"))
 
-# =====================================================================
-# MODE: Một quân cờ
-# =====================================================================
-if mode == "Một quân cờ":
-    if not path_b:
-        st.error("Thiếu `model_b_figure_direction.pt`. Upload ở sidebar.")
-        st.stop()
+def _resolve_config(model_name: Optional[str] = None) -> dict:
+    cfg = default_config()
 
-    with st.spinner("Đang nhận diện 1 quân..."):
-        try:
-            model_b = get_model_b(path_b, device)
-            figure, direction, conf = predict_cell(model_b, image_bgr, device)
-        except Exception as e:
-            st.error(f"Lỗi: {e}")
-            import traceback
-            st.code(traceback.format_exc())
-            st.stop()
+    cfg_path = Path(os.getenv("API_CONFIG", str(DEFAULT_CONFIG)))
+    if cfg_path.is_file():
+        deep_merge(cfg, load_config(cfg_path))
 
-    st.subheader("Kết quả — 1 quân")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.image(image_rgb, width=200)
-    with c2:
-        short = FIGURE_SHORT.get(figure, figure[:2])
-        arrow = ""
-        if direction == "UP":
-            arrow = " ^"
-        elif direction == "DOWN":
-            arrow = " v"
+    apply_env_overrides(cfg)
 
-        st.success(f"**{figure}**  →  `{short}{arrow}`")
-        st.metric("Confidence", f"{conf:.1%}")
-        if direction:
-            st.write(f"Hướng: **{direction}**")
+    if model_name:
+        profile = CONFIGS_DIR / f"{model_name}.yaml"
+        if profile.is_file():
+            deep_merge(cfg, load_config(profile))
         else:
-            st.write("Hướng: _(ô trống / không áp dụng)_")
+            candidate = MODELS_DIR / model_name
+            if candidate.is_file():
+                cfg.setdefault("model", {})["weights"] = str(candidate)
+            elif Path(model_name).is_file():
+                cfg.setdefault("model", {})["weights"] = str(Path(model_name).resolve())
+            else:
+                raise HTTPException(
+                    404,
+                    f"Model '{model_name}' not found. Expected a yaml profile in "
+                    f"configs/ or a weights file in models/. See GET /models.",
+                )
 
-    st.stop()
+    m = cfg.setdefault("model", {})
 
-# =====================================================================
-# MODE: Cả bàn cờ (9×9)
-# =====================================================================
-if not path_a or not path_b:
-    st.error("Chế độ bàn cờ cần cả `best.pt` và `model_b_figure_direction.pt`.")
-    st.stop()
+    weights = m.get("weights", "")
+    if weights and not os.path.isabs(weights):
+        alt = MODELS_DIR / Path(weights).name
+        if alt.is_file():
+            m["weights"] = str(alt)
+        elif (APP_DIR / weights).is_file():
+            m["weights"] = str(APP_DIR / weights)
 
-with st.spinner("Đang load model & nhận diện bàn cờ..."):
-    try:
-        model_a = get_model_a(path_a, device)
-        model_b = get_model_b(path_b, device)
-    except Exception as e:
-        st.error(f"Lỗi load model: {e}")
-        import traceback
-        st.code(traceback.format_exc())
-        st.stop()
+    if m.get("device") in (None, "", "auto"):
+        m["device"] = "cuda" if torch.cuda.is_available() else "cpu"
 
-    try:
-        result = analyze_board(
-            image_bgr,
-            model_a,
-            model_b,
-            device=device,
-            margins=(margin, margin, margin, margin),
+    return cfg
+
+def get_detector(model_name: Optional[str] = None) -> Detector:
+    cfg = _resolve_config(model_name)
+    key = json.dumps(cfg, sort_keys=True, default=str)
+
+    det = _detectors.get(key)
+    if det is not None:
+        return det
+
+    weights = cfg["model"].get("weights", "")
+    if not weights or not os.path.isfile(weights):
+        raise HTTPException(
+            404,
+            f"Weights not found: '{weights}'. Train on Colab, put best.pt into "
+            "models/, or upload via POST /models/upload.",
         )
+    try:
+        det = Detector.from_cfg(cfg)
     except Exception as e:
-        st.error(f"Lỗi nhận diện: {e}")
-        import traceback
-        st.code(traceback.format_exc())
-        st.stop()
+        raise HTTPException(500, f"Failed to load model: {e}") from e
 
-board_state = result["board_state"]
-warped = result["warped"]
-H = result["H"]
+    with _cache_lock:
+        _detectors.setdefault(key, det)
+        while len(_detectors) > MAX_CACHED_MODELS: 
+            _detectors.pop(next(iter(_detectors)))
+        det = _detectors[key]
+    return det
 
-# Filter low-confidence predictions
-if conf_threshold > 0:
-    for k, v in list(board_state.items()):
-        if v["figure"] != "EMPTY" and v["conf"] < conf_threshold:
-            board_state[k] = {**v, "figure": "EMPTY", "direction": None}
 
-warped_boxed = draw_boxes_on_warped(warped, board_state, show_empty=show_empty)
-original_boxed = draw_boxes_on_original(
-    image_bgr, board_state, H, result["out_size"], show_empty=show_empty
-)
+# ---------------------------------------------------------------------------
+# Response schemas
+# ---------------------------------------------------------------------------
+class DetectionItem(BaseModel):
+    class_id: int
+    class_name: str
+    confidence: float
+    bbox: List[float] = Field(..., description="[x1, y1, x2, y2] in pixels")
 
-st.subheader("Kết quả")
-c1, c2 = st.columns(2)
-with c1:
-    st.markdown("**Bàn đã nắn phẳng + bounding box**")
-    st.image(cv2.cvtColor(warped_boxed, cv2.COLOR_BGR2RGB), use_container_width=True)
-with c2:
-    st.markdown("**Ảnh gốc + bounding box**")
-    st.image(cv2.cvtColor(original_boxed, cv2.COLOR_BGR2RGB), use_container_width=True)
+class ImagePredictResponse(BaseModel):
+    num_detections: int
+    detections: List[DetectionItem]
+    inference_ms: float
+    image_width: int
+    image_height: int
+    annotated_image_b64: Optional[str] = Field(None)
+    model_weights: str
 
-st.subheader("Trạng thái bàn cờ (text)")
-text = board_state_to_text(board_state)
-st.code(text, language=None)
+class VideoPredictResponse(BaseModel):
+    num_frames: int
+    total_frames_in_video: Optional[int] = None
+    fps: float
+    frame_step: int = 1
+    elapsed_sec: float
+    total_detections: int
+    class_counts: Dict[str, int] = Field(default_factory=dict)
+    detections_per_frame: List[List[DetectionItem]]
+    output_video: Optional[str] = None
+    output_video_url: Optional[str] = None
+    model_weights: str
 
-counts = Counter(v["figure"] for v in board_state.values() if v["figure"] != "EMPTY")
-if counts:
-    st.markdown("**Số lượng quân phát hiện:**")
-    st.write(dict(counts))
+def _parse_classes(raw: Optional[str]) -> Optional[List[int]]:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return [int(x) for x in raw.replace(" ", "").split(",") if x != ""]
+    except ValueError:
+        raise HTTPException(400, f"Invalid classes filter: {raw!r}")
 
-st.subheader("Tải kết quả")
-d1, d2, d3 = st.columns(3)
-d1.download_button(
-    "⬇️ Warped + boxes (PNG)",
-    data=encode_png(warped_boxed),
-    file_name="shogi_warped_boxes.png",
-    mime="image/png",
-)
-d2.download_button(
-    "⬇️ Original + boxes (PNG)",
-    data=encode_png(original_boxed),
-    file_name="shogi_original_boxes.png",
-    mime="image/png",
-)
-d3.download_button(
-    "⬇️ Board state (TXT)",
-    data=text.encode("utf-8"),
-    file_name="board_state.txt",
-    mime="text/plain",
-)
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/")
+def root():
+    """Trả về trực tiếp file giao diện index.html khi người dùng vào thư mục gốc"""
+    index_file = APP_DIR / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
+    return {"error": "Không tìm thấy file index.html trong thư mục! Hãy tải file index.html lên Google Drive."}
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "cuda": torch.cuda.is_available(),
+            "cached_models": len(_detectors)}
+
+@app.get("/models")
+def list_models():
+    return {
+        "weights": sorted(p.name for p in MODELS_DIR.glob("*.pt")),
+        "profiles": sorted(p.stem for p in CONFIGS_DIR.glob("*.yaml")),
+        "usage": "Add ?model=<profile-or-filename> to /predict/* to pick one at runtime",
+    }
+
+@app.get("/models/info")
+async def model_info(model: Optional[str] = Query(None)):
+    det = await run_in_threadpool(get_detector, model)
+    info = det.info()
+    info["names"] = {str(k): v for k, v in info.get("names", {}).items()}
+    return info
+
+@app.post("/models/upload")
+async def upload_weights(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.endswith(".pt"):
+        raise HTTPException(400, "Only .pt files are accepted")
+    dest = MODELS_DIR / Path(file.filename).name
+    size = 0
+    with dest.open("wb") as f:
+        while True:
+            chunk = await file.read(1 << 20)
+            if not chunk: break
+            f.write(chunk)
+            size += len(chunk)
+    if size == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "Empty file")
+    with _cache_lock: _detectors.clear()
+    return {"saved": str(dest), "size_bytes": size}
+
+# --- ENDPOINT MODEL B (PYTORCH: ĐỌC QUÂN CỜ) ---
+@app.post("/predict/piece")
+async def predict_piece_endpoint(file: UploadFile = File(...)):
+    if model_b is None:
+        raise HTTPException(500, "Model B chưa được nạp.")
+    
+    raw = await file.read()
+    img = Image.open(io.BytesIO(raw)).convert('RGB')
+    tensor = transform_b(img).unsqueeze(0).to(device_b)
+
+    with torch.no_grad():
+        out_fig, out_dir = model_b(tensor)
+        fig_idx = out_fig.argmax(1).item()
+        dir_idx = out_dir.argmax(1).item()
+
+    return {
+        "success": True,
+        "figure": FIGURE_MAP.get(fig_idx, "Không rõ"),
+        "direction": DIR_MAP.get(dir_idx, "Không rõ")
+    }
+
+# --- ENDPOINT MODEL A (YOLOV5: ẢNH VÀ VIDEO) ---
+@app.post("/predict/image", response_model=ImagePredictResponse)
+async def predict_image_endpoint(
+    file: UploadFile = File(...),
+    model: Optional[str] = Query(None),
+    conf: Optional[float] = Query(None, ge=0.0, le=1.0),
+    iou: Optional[float] = Query(None, ge=0.0, le=1.0),
+    classes: Optional[str] = Query(None),
+    return_image: bool = Query(False),
+    include_image: bool = Query(False),
+):
+    raw = await file.read()
+    if not raw: raise HTTPException(400, "Empty file")
+
+    det = await run_in_threadpool(get_detector, model)
+
+    kw: Dict[str, Any] = {}
+    if conf is not None: kw["conf_thres"] = conf
+    if iou is not None: kw["iou_thres"] = iou
+    cls_ids = _parse_classes(classes)
+    if cls_ids is not None: kw["classes"] = cls_ids
+
+    def _infer():
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None: return None
+        t0 = time.perf_counter()
+        results = det.predict_image(img, **kw)
+        ms = (time.perf_counter() - t0) * 1000
+        annotated_b64, png_bytes = None, None
+        if return_image or include_image:
+            annotated = det.draw(img, results)
+            if include_image:
+                ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok: annotated_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+            if return_image:
+                ok, buf = cv2.imencode(".png", annotated)
+                if ok: png_bytes = buf.tobytes()
+        return img, results, ms, annotated_b64, png_bytes
+
+    out = await run_in_threadpool(_infer)
+    if out is None: raise HTTPException(400, "Cannot decode image")
+    img, results, elapsed_ms, annotated_b64, png_bytes = out
+
+    if return_image:
+        if png_bytes is None: raise HTTPException(500, "Failed to encode annotated image")
+        return Response(content=png_bytes, media_type="image/png",
+                        headers={"Content-Disposition": 'inline; filename="detections.png"'})
+
+    h, w = img.shape[:2]
+    return ImagePredictResponse(
+        num_detections=len(results),
+        detections=[DetectionItem(**r) for r in results],
+        inference_ms=round(elapsed_ms, 2),
+        image_width=w,
+        image_height=h,
+        annotated_image_b64=annotated_b64,
+        model_weights=det.weights,
+    )
+
+@app.post("/predict/video", response_model=VideoPredictResponse)
+async def predict_video_endpoint(
+    file: UploadFile = File(...),
+    model: Optional[str] = Query(None),
+    conf: Optional[float] = Query(None, ge=0.0, le=1.0),
+    iou: Optional[float] = Query(None, ge=0.0, le=1.0),
+    classes: Optional[str] = Query(None),
+    save_video: bool = Query(True),
+    frame_step: int = Query(1, ge=1),
+    max_frames: Optional[int] = Query(None, ge=1),
+    include_detections: bool = Query(True),
+):
+    suffix = Path(file.filename or "video.mp4").suffix.lower() or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        while True:
+            chunk = await file.read(1 << 20)
+            if not chunk: break
+            tmp.write(chunk)
+        tmp_path = tmp.name
+
+    det = await run_in_threadpool(get_detector, model)
+
+    kw: Dict[str, Any] = {}
+    if conf is not None: kw["conf_thres"] = conf
+    if iou is not None: kw["iou_thres"] = iou
+    cls_ids = _parse_classes(classes)
+    if cls_ids is not None: kw["classes"] = cls_ids
+
+    out_path = None
+    if save_video:
+        out_ext = suffix if suffix in {".mp4", ".avi", ".mov"} else ".mp4"
+        out_path = str(OUTPUTS_DIR / f"pred_{int(time.time() * 1000)}{out_ext}")
+
+    try:
+        summary = await run_in_threadpool(
+            det.predict_video, tmp_path, out_path,
+            frame_step=frame_step, max_frames=max_frames,
+            include_detections=include_detections, **kw,
+        )
+    finally:
+        try: os.unlink(tmp_path)
+        except OSError: pass
+
+    frames = [[DetectionItem(**d) for d in fr] for fr in summary["detections_per_frame"]]
+    out_name = Path(summary["output_path"]).name if summary.get("output_path") else None
+
+    return VideoPredictResponse(
+        num_frames=summary["num_frames"],
+        total_frames_in_video=summary.get("total_frames_in_video"),
+        fps=summary["fps"],
+        frame_step=summary.get("frame_step", 1),
+        elapsed_sec=summary["elapsed_sec"],
+        total_detections=sum(summary["class_counts"].values()),
+        class_counts=summary["class_counts"],
+        detections_per_frame=frames,
+        output_video=out_name,
+        output_video_url=f"/outputs/{out_name}" if out_name else None,
+        model_weights=det.weights,
+    )
+
+@app.get("/outputs/{filename}")
+def download_output(filename: str):
+    if Path(filename).name != filename: raise HTTPException(400, "Invalid filename")
+    path = OUTPUTS_DIR / filename
+    if not path.is_file(): raise HTTPException(404, "File not found")
+    ext = path.suffix.lower()
+    media = ("video/mp4" if ext == ".mp4" else "video/quicktime" if ext == ".mov" else "video/x-msvideo" if ext == ".avi" else "application/octet-stream")
+    return FileResponse(path, media_type=media, filename=filename)
+
+@app.post("/cache/clear")
+def clear_model_cache():
+    with _cache_lock:
+        n = len(_detectors)
+        _detectors.clear()
+    return {"cleared_models": n}
+
+# ---------------------------------------------------------------------------
+# Local entry
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)

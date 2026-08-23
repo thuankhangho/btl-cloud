@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLOv5 AI Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; color: #333; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); width: 100%; max-width: 800px; }
+        h1 { text-align: center; color: #2c3e50; margin-top: 0; }
+        .form-group { margin-bottom: 15px; }
+        label { font-weight: bold; display: block; margin-bottom: 5px; color: #555; }
+        input[type="text"], input[type="file"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+        .row { display: flex; gap: 15px; }
+        .row .form-group { flex: 1; }
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #95a5a6; cursor: not-allowed; }
+        .result-panel { margin-top: 20px; text-align: center; display: none; }
+        .media-container { margin-bottom: 20px; border: 2px dashed #ddd; border-radius: 8px; padding: 10px; min-height: 200px; display: flex; justify-content: center; align-items: center;}
+        img, video { max-width: 100%; max-height: 500px; border-radius: 6px; }
+        .json-output { text-align: left; background: #2d2d2d; color: #a6e22e; padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace; font-size: 14px; }
+        .loader { display: none; text-align: center; margin-top: 20px; font-weight: bold; color: #007bff; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🚀 YOLOv5 AI Dashboard</h1>
+    
+    <div class="row">
+        <div class="form-group">
+            <label>🧠 Tên model</label>
+            <input type="text" id="modelName" placeholder="Ví dụ: visdrone (Hoặc để trống)">
+        </div>
+        <div class="form-group">
+            <label>📂 Tải ảnh lên:</label>
+            <input type="file" id="mediaFile" accept="image/*, video/*" required>
+        </div>
+    </div>
+
+    <button id="submitBtn" onclick="runAI()">🔍 Xử lý bằng AI</button>
+    <div class="loader" id="loader">⏳ AI đang xử lý... Vui lòng chờ...</div>
+
+    <!-- KHUNG KẾT QUẢ -->
+    <div class="result-panel" id="resultPanel">
+        <h3>Kết quả nhận diện</h3>
+        <div class="media-container" id="mediaContainer"></div>
+        <pre class="json-output" id="jsonOutput">Đang chờ dữ liệu...</pre>
+    </div>
+</div>
+
+<script>
+    async function runAI() {
+        const fileInput = document.getElementById('mediaFile');
+        const modelName = document.getElementById('modelName').value;
+        const submitBtn = document.getElementById('submitBtn');
+        const loader = document.getElementById('loader');
+        const resultPanel = document.getElementById('resultPanel');
+        const mediaContainer = document.getElementById('mediaContainer');
+        const jsonOutput = document.getElementById('jsonOutput');
+
+        if (!fileInput.files[0]) {
+            alert("Vui lòng chọn file Ảnh hoặc Video!");
+            return;
+        }
+
+        const file = fileInput.files[0];
+        const isVideo = file.type.startsWith("video/");
+        
+        const endpoint = isVideo ? "/predict/video" : "/predict/image";
+        let queryParams = isVideo ? "?save_video=true&include_detections=false" : "?include_image=true";
+        if (modelName) queryParams += `&model=${modelName}`;
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        submitBtn.disabled = true;
+        loader.style.display = "block";
+        resultPanel.style.display = "none";
+        mediaContainer.innerHTML = "";
+        jsonOutput.textContent = "";
+
+        try {
+            const response = await fetch(endpoint + queryParams, {
+                method: "POST",
+                body: formData
+            });
+
+            if (!response.ok) {
+                const err = await response.text();
+                throw new Error(`Lỗi ${response.status}: ${err}`);
+            }
+
+            const data = await response.json();
+
+            if (isVideo) {
+                mediaContainer.innerHTML = `<video src="${window.location.origin}${data.output_video_url}" controls autoplay></video>`;
+            } else {
+                mediaContainer.innerHTML = `<img src="data:image/jpeg;base64,${data.annotated_image_b64}" alt="AI Result">`;
+            }
+
+            if (data.annotated_image_b64) delete data.annotated_image_b64; 
+            jsonOutput.textContent = JSON.stringify(data, null, 2);
+            
+            resultPanel.style.display = "block";
+        } catch (error) {
+            alert("Chạy AI thất bại: \n" + error.message);
+        } finally {
+            submitBtn.disabled = false;
+            loader.style.display = "none";
+        }
+    }
+</script>
+</body>
+</html>

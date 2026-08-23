@@ -1,0 +1,5 @@
+model:
+  weights: models/visdrone.pt
+  device: auto
+  img_size: 1280
+  conf_thres: 0.45

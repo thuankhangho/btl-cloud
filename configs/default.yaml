@@ -1,0 +1,5 @@
+model:
+  weights: models/yolov5m.pt
+  device: auto
+  img_size: 1280        # vật thể nhỏ trên ảnh drone → dùng đúng kích thước lúc train
+  conf_thres: 0.45
