@@ -25,12 +25,46 @@
         .piece-badge h2 { margin: 0 0 10px 0; color: #2980b9; font-size: 22px; }
         .piece-badge p { margin: 6px 0; font-size: 16px; }
 
-        /* Style Camera */
+        /* Style Camera & Khung ngắm cắt ảnh */
         .cam-controls { display: flex; gap: 10px; margin-top: 5px; }
         .cam-btn { flex: 1; padding: 10px; border-radius: 6px; font-size: 14px; font-weight: bold; border: none; cursor: pointer; }
         .btn-cam-toggle { background: #28a745; color: white; }
         .btn-cam-snap { background: #ffc107; color: #222; display: none; }
         .cam-preview-box { display: none; text-align: center; background: #111; padding: 10px; border-radius: 6px; margin-top: 10px; }
+        
+        .cam-wrapper {
+            position: relative;
+            display: inline-block;
+            width: 100%;
+            max-width: 480px;
+            overflow: hidden;
+            border-radius: 6px;
+        }
+        .viewfinder-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 55%;
+            aspect-ratio: 1 / 1;
+            border: 2px dashed #00ff00;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+            pointer-events: none;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            border-radius: 8px;
+            padding-bottom: 6px;
+            box-sizing: border-box;
+        }
+        .viewfinder-box span {
+            color: #00ff00;
+            font-size: 12px;
+            font-weight: bold;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
@@ -57,7 +91,7 @@
         </div>
     </div>
 
-    <!-- Tính năng chụp hình qua Camera -->
+    <!-- Tính năng chụp hình qua Camera với Khung ngắm cắt viền -->
     <div class="form-group" style="margin-bottom: 15px;">
         <label>📷 Hoặc mở camera & chụp ảnh:</label>
         <div class="cam-controls">
@@ -65,10 +99,15 @@
             <button type="button" class="cam-btn btn-cam-snap" id="btnSnap" onclick="capturePhoto()">📸 Chụp hình này</button>
         </div>
         <div class="cam-preview-box" id="camPreviewBox">
-            <video id="webcam" autoplay playsinline muted style="width: 100%; max-height: 360px; border-radius: 4px;"></video>
+            <div class="cam-wrapper">
+                <video id="webcam" autoplay playsinline muted style="width: 100%; max-height: 380px; display: block; border-radius: 4px;"></video>
+                <div class="viewfinder-box">
+                    <span>🎯 Căn quân cờ vào ô này</span>
+                </div>
+            </div>
             <canvas id="hiddenCanvas" style="display: none;"></canvas>
             <div id="capturedBox" style="display: none; margin-top: 10px; background: #fff; padding: 10px; border-radius: 4px;">
-                <p style="color: #28a745; margin: 0 0 5px 0; font-weight: bold;">Ảnh đã chụp:</p>
+                <p style="color: #28a745; margin: 0 0 5px 0; font-weight: bold;">Ảnh đã cắt gọn (bỏ nền thừa):</p>
                 <img id="capturedImg" style="max-height: 180px; border: 2px solid #28a745; border-radius: 4px;">
             </div>
         </div>
@@ -87,6 +126,7 @@
 <script>
     let camStream = null;
     let capturedBlob = null;
+    const CROP_RATIO = 0.55; // Tỷ lệ cắt tương ứng 55% vùng trung tâm của khung ngắm
 
     function switchMode() {
         const mode = document.getElementById('taskMode').value;
@@ -113,20 +153,25 @@
 
         if (!camStream) {
             try {
-                camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+                camStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }, 
+                    audio: false 
+                });
                 video.srcObject = camStream;
                 box.style.display = 'block';
                 btnSnap.style.display = 'block';
                 btnToggle.textContent = '⏹️ Tắt Camera';
                 btnToggle.style.background = '#dc3545';
-            } catch (err) { alert("Không thể truy cập camera: " + err.message); }
+            } catch (err) { 
+                alert("Không thể truy cập camera: " + err.message); 
+            }
         } else {
             camStream.getTracks().forEach(t => t.stop());
             camStream = null;
             video.srcObject = null;
             box.style.display = 'none';
             btnSnap.style.display = 'none';
-            btnToggle.textContent = 'Bật Camera';
+            btnToggle.textContent = 'Bật camera';
             btnToggle.style.background = '#28a745';
         }
     }
@@ -136,19 +181,29 @@
         const canvas = document.getElementById('hiddenCanvas');
         if (!video.videoWidth) { alert("Camera chưa sẵn sàng!"); return; }
 
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        // Tính toán tọa độ và cắt khung vuông chính giữa video
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const cropSize = Math.min(vw, vh) * CROP_RATIO;
+        const startX = (vw - cropSize) / 2;
+        const startY = (vh - cropSize) / 2;
+
+        canvas.width = cropSize;
+        canvas.height = cropSize;
+        const ctx = canvas.getContext('2d');
+        
+        // Vẽ phần trung tâm vào canvas
+        ctx.drawImage(video, startX, startY, cropSize, cropSize, 0, 0, cropSize, cropSize);
 
         canvas.toBlob((blob) => {
             capturedBlob = blob;
             document.getElementById('capturedImg').src = URL.createObjectURL(blob);
             document.getElementById('capturedBox').style.display = 'block';
-            document.getElementById('mediaFile').value = ''; // Xóa file upload nếu đã chụp
+            document.getElementById('mediaFile').value = ''; // Xóa tệp upload nếu dùng ảnh chụp
         }, 'image/jpeg', 0.95);
     }
 
-    // Xóa ảnh camera nếu người dùng chọn file Upload
+    // Xóa ảnh chụp nếu người dùng chuyển sang chọn file từ máy
     document.getElementById('mediaFile').addEventListener('change', () => {
         capturedBlob = null;
         document.getElementById('capturedBox').style.display = 'none';
@@ -164,13 +219,9 @@
         const mediaContainer = document.getElementById('mediaContainer');
         const jsonOutput = document.getElementById('jsonOutput');
 
-        // Logic tự động nhận diện Nguồn ảnh
         let file = fileInput.files[0];
-        let source = "upload"; 
-
         if (!file && capturedBlob) {
-            file = new File([capturedBlob], "camera_snapshot.jpg", { type: "image/jpeg" });
-            source = "camera"; // Đánh dấu ảnh này đến từ Camera
+            file = new File([capturedBlob], "cropped_piece.jpg", { type: "image/jpeg" });
         }
 
         if (!file) {
@@ -190,13 +241,11 @@
 
         try {
             if (mode === 'piece') {
-                // Truyền tham số "source" xuống API
-                const response = await fetch(`/predict/piece?source=${source}`, {
+                const response = await fetch(`/predict/piece`, {
                     method: "POST",
                     body: formData
                 });
 
-                // BẮT LỖI 500 TỪ SERVER VÀ HIỂN THỊ CHI TIẾT
                 if (!response.ok) {
                     const errText = await response.text();
                     let detail = errText;
@@ -215,8 +264,6 @@
                         <p><b>Loại quân:</b> <span style="color:#d35400; font-size:18px;">${data.figure_name}</span></p>
                         <p><b>Hướng cờ:</b> <span>${data.direction_name}</span></p>
                         <p><b>Độ tin cậy:</b> <span>${(data.confidence * 100).toFixed(2)}%</span></p>
-                        <p style="font-size:12px; color:gray; border-top: 1px dashed #ccc; padding-top: 5px; margin-top: 10px;">
-                        </p>
                     </div>
                     <img src="${URL.createObjectURL(file)}" style="max-width:160px; border:2px solid #ccc; border-radius:8px;">
                 `;
@@ -229,7 +276,6 @@
 
                 const response = await fetch(endpoint + queryParams, { method: "POST", body: formData });
 
-                // BẮT LỖI 500 CHO YOLOV5
                 if (!response.ok) {
                     const errText = await response.text();
                     let detail = errText;
