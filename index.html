@@ -3,55 +3,159 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YOLOv5 AI Dashboard</title>
+    <title>AI Computer Vision Dashboard</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; color: #333; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
-        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); width: 100%; max-width: 800px; }
+        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); width: 100%; max-width: 850px; }
         h1 { text-align: center; color: #2c3e50; margin-top: 0; }
         .form-group { margin-bottom: 15px; }
-        label { font-weight: bold; display: block; margin-bottom: 5px; color: #555; }
-        input[type="text"], input[type="file"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+        label { font-weight: bold; display: block; margin-bottom: 6px; color: #444; }
+        input[type="text"], input[type="file"], select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 14px; }
         .row { display: flex; gap: 15px; }
         .row .form-group { flex: 1; }
         button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-top: 10px; }
         button:hover { background: #0056b3; }
         button:disabled { background: #95a5a6; cursor: not-allowed; }
         .result-panel { margin-top: 20px; text-align: center; display: none; }
-        .media-container { margin-bottom: 20px; border: 2px dashed #ddd; border-radius: 8px; padding: 10px; min-height: 200px; display: flex; justify-content: center; align-items: center;}
+        .media-container { margin-bottom: 20px; border: 2px dashed #ddd; border-radius: 8px; padding: 15px; min-height: 200px; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #fafafa; }
         img, video { max-width: 100%; max-height: 500px; border-radius: 6px; }
         .json-output { text-align: left; background: #2d2d2d; color: #a6e22e; padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace; font-size: 14px; }
         .loader { display: none; text-align: center; margin-top: 20px; font-weight: bold; color: #007bff; }
+        .piece-badge { background: #e8f4fd; border: 2px solid #3498db; border-radius: 8px; padding: 20px; width: 80%; text-align: left; margin-bottom: 15px; }
+        .piece-badge h2 { margin: 0 0 10px 0; color: #2980b9; font-size: 22px; }
+        .piece-badge p { margin: 6px 0; font-size: 16px; }
+
+        /* Style Camera */
+        .cam-controls { display: flex; gap: 10px; margin-top: 5px; }
+        .cam-btn { flex: 1; padding: 10px; border-radius: 6px; font-size: 14px; font-weight: bold; border: none; cursor: pointer; }
+        .btn-cam-toggle { background: #28a745; color: white; }
+        .btn-cam-snap { background: #ffc107; color: #222; display: none; }
+        .cam-preview-box { display: none; text-align: center; background: #111; padding: 10px; border-radius: 6px; margin-top: 10px; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h1>🚀 YOLOv5 AI Dashboard</h1>
+    <h1>🚀 YOLOv5 Detection Dashboard</h1>
     
+    <div class="form-group">
+        <label>⚙️ Chọn chức năng:</label>
+        <select id="taskMode" onchange="switchMode()">
+            <option value="yolo">Phát hiện đối tượng</option>
+            <option value="piece">Phân loại quân cờ Shogi</option>
+        </select>
+    </div>
+
     <div class="row">
-        <div class="form-group">
-            <label>🧠 Tên model</label>
-            <input type="text" id="modelName" placeholder="Ví dụ: visdrone (Hoặc để trống)">
+        <div class="form-group" id="modelNameGroup">
+            <label>🧠 Tên model (bỏ trống = default):</label>
+            <input type="text" id="modelName">
         </div>
         <div class="form-group">
-            <label>📂 Tải ảnh lên:</label>
-            <input type="file" id="mediaFile" accept="image/*, video/*" required>
+            <label id="fileLabel">📂 Upload ảnh:</label>
+            <input type="file" id="mediaFile" accept="image/*, video/*">
+        </div>
+    </div>
+
+    <!-- Tính năng chụp hình qua Camera -->
+    <div class="form-group" style="margin-bottom: 15px;">
+        <label>📷 Hoặc mở camera & chụp ảnh:</label>
+        <div class="cam-controls">
+            <button type="button" class="cam-btn btn-cam-toggle" id="btnToggleCam" onclick="toggleCamera()">Bật camera</button>
+            <button type="button" class="cam-btn btn-cam-snap" id="btnSnap" onclick="capturePhoto()">📸 Chụp hình này</button>
+        </div>
+        <div class="cam-preview-box" id="camPreviewBox">
+            <video id="webcam" autoplay playsinline muted style="width: 100%; max-height: 360px; border-radius: 4px;"></video>
+            <canvas id="hiddenCanvas" style="display: none;"></canvas>
+            <div id="capturedBox" style="display: none; margin-top: 10px; background: #fff; padding: 10px; border-radius: 4px;">
+                <p style="color: #28a745; margin: 0 0 5px 0; font-weight: bold;">Ảnh đã chụp:</p>
+                <img id="capturedImg" style="max-height: 180px; border: 2px solid #28a745; border-radius: 4px;">
+            </div>
         </div>
     </div>
 
     <button id="submitBtn" onclick="runAI()">🔍 Xử lý bằng AI</button>
-    <div class="loader" id="loader">⏳ AI đang xử lý... Vui lòng chờ...</div>
+    <div class="loader" id="loader">⏳ AI đang xử lý...</div>
 
-    <!-- KHUNG KẾT QUẢ -->
     <div class="result-panel" id="resultPanel">
-        <h3>Kết quả nhận diện</h3>
+        <h3>✨ Kết quả phân tích</h3>
         <div class="media-container" id="mediaContainer"></div>
         <pre class="json-output" id="jsonOutput">Đang chờ dữ liệu...</pre>
     </div>
 </div>
 
 <script>
+    let camStream = null;
+    let capturedBlob = null;
+
+    function switchMode() {
+        const mode = document.getElementById('taskMode').value;
+        const modelNameGroup = document.getElementById('modelNameGroup');
+        const fileLabel = document.getElementById('fileLabel');
+        const mediaFile = document.getElementById('mediaFile');
+
+        if (mode === 'piece') {
+            modelNameGroup.style.display = 'none';
+            fileLabel.textContent = '📂 Upload ảnh quân cờ:';
+            mediaFile.accept = 'image/*';
+        } else {
+            modelNameGroup.style.display = 'block';
+            fileLabel.textContent = '📂 Upload ảnh:';
+            mediaFile.accept = 'image/*, video/*';
+        }
+    }
+
+    async function toggleCamera() {
+        const box = document.getElementById('camPreviewBox');
+        const btnToggle = document.getElementById('btnToggleCam');
+        const btnSnap = document.getElementById('btnSnap');
+        const video = document.getElementById('webcam');
+
+        if (!camStream) {
+            try {
+                camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+                video.srcObject = camStream;
+                box.style.display = 'block';
+                btnSnap.style.display = 'block';
+                btnToggle.textContent = '⏹️ Tắt Camera';
+                btnToggle.style.background = '#dc3545';
+            } catch (err) { alert("Không thể truy cập camera: " + err.message); }
+        } else {
+            camStream.getTracks().forEach(t => t.stop());
+            camStream = null;
+            video.srcObject = null;
+            box.style.display = 'none';
+            btnSnap.style.display = 'none';
+            btnToggle.textContent = 'Bật Camera';
+            btnToggle.style.background = '#28a745';
+        }
+    }
+
+    function capturePhoto() {
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('hiddenCanvas');
+        if (!video.videoWidth) { alert("Camera chưa sẵn sàng!"); return; }
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        canvas.toBlob((blob) => {
+            capturedBlob = blob;
+            document.getElementById('capturedImg').src = URL.createObjectURL(blob);
+            document.getElementById('capturedBox').style.display = 'block';
+            document.getElementById('mediaFile').value = ''; // Xóa file upload nếu đã chụp
+        }, 'image/jpeg', 0.95);
+    }
+
+    // Xóa ảnh camera nếu người dùng chọn file Upload
+    document.getElementById('mediaFile').addEventListener('change', () => {
+        capturedBlob = null;
+        document.getElementById('capturedBox').style.display = 'none';
+    });
+
     async function runAI() {
+        const mode = document.getElementById('taskMode').value;
         const fileInput = document.getElementById('mediaFile');
         const modelName = document.getElementById('modelName').value;
         const submitBtn = document.getElementById('submitBtn');
@@ -60,52 +164,92 @@
         const mediaContainer = document.getElementById('mediaContainer');
         const jsonOutput = document.getElementById('jsonOutput');
 
-        if (!fileInput.files[0]) {
-            alert("Vui lòng chọn file Ảnh hoặc Video!");
+        // Logic tự động nhận diện Nguồn ảnh
+        let file = fileInput.files[0];
+        let source = "upload"; 
+
+        if (!file && capturedBlob) {
+            file = new File([capturedBlob], "camera_snapshot.jpg", { type: "image/jpeg" });
+            source = "camera"; // Đánh dấu ảnh này đến từ Camera
+        }
+
+        if (!file) {
+            alert("Vui lòng chọn file ảnh hoặc chụp ảnh từ camera!");
             return;
         }
 
-        const file = fileInput.files[0];
         const isVideo = file.type.startsWith("video/");
-        
-        const endpoint = isVideo ? "/predict/video" : "/predict/image";
-        let queryParams = isVideo ? "?save_video=true&include_detections=false" : "?include_image=true";
-        if (modelName) queryParams += `&model=${modelName}`;
-
-        const formData = new FormData();
-        formData.append("file", file);
-
         submitBtn.disabled = true;
         loader.style.display = "block";
         resultPanel.style.display = "none";
         mediaContainer.innerHTML = "";
         jsonOutput.textContent = "";
 
+        const formData = new FormData();
+        formData.append("file", file);
+
         try {
-            const response = await fetch(endpoint + queryParams, {
-                method: "POST",
-                body: formData
-            });
+            if (mode === 'piece') {
+                // Truyền tham số "source" xuống API
+                const response = await fetch(`/predict/piece?source=${source}`, {
+                    method: "POST",
+                    body: formData
+                });
 
-            if (!response.ok) {
-                const err = await response.text();
-                throw new Error(`Lỗi ${response.status}: ${err}`);
-            }
+                // BẮT LỖI 500 TỪ SERVER VÀ HIỂN THỊ CHI TIẾT
+                if (!response.ok) {
+                    const errText = await response.text();
+                    let detail = errText;
+                    try { detail = JSON.parse(errText).detail || errText; } catch(e){}
+                    throw new Error(`Lỗi Hệ thống (${response.status}): ${detail}`);
+                }
 
-            const data = await response.json();
+                const data = await response.json();
+                if (!data.success) {
+                    throw new Error(data.error || "Lỗi xử lý bên trong mô hình.");
+                }
 
-            if (isVideo) {
-                mediaContainer.innerHTML = `<video src="${window.location.origin}${data.output_video_url}" controls autoplay></video>`;
+                mediaContainer.innerHTML = `
+                    <div class="piece-badge">
+                        <h2>♟️ Kết quả phân loại quân cờ</h2>
+                        <p><b>Loại quân:</b> <span style="color:#d35400; font-size:18px;">${data.figure_name}</span></p>
+                        <p><b>Hướng cờ:</b> <span>${data.direction_name}</span></p>
+                        <p><b>Độ tin cậy:</b> <span>${(data.confidence * 100).toFixed(2)}%</span></p>
+                        <p style="font-size:12px; color:gray; border-top: 1px dashed #ccc; padding-top: 5px; margin-top: 10px;">
+                        </p>
+                    </div>
+                    <img src="${URL.createObjectURL(file)}" style="max-width:160px; border:2px solid #ccc; border-radius:8px;">
+                `;
+                jsonOutput.textContent = JSON.stringify(data, null, 2);
+
             } else {
-                mediaContainer.innerHTML = `<img src="data:image/jpeg;base64,${data.annotated_image_b64}" alt="AI Result">`;
-            }
+                const endpoint = isVideo ? "/predict/video" : "/predict/image";
+                let queryParams = isVideo ? "?save_video=true&include_detections=false" : "?include_image=true";
+                if (modelName) queryParams += `&model=${encodeURIComponent(modelName)}`;
 
-            if (data.annotated_image_b64) delete data.annotated_image_b64; 
-            jsonOutput.textContent = JSON.stringify(data, null, 2);
-            
+                const response = await fetch(endpoint + queryParams, { method: "POST", body: formData });
+
+                // BẮT LỖI 500 CHO YOLOV5
+                if (!response.ok) {
+                    const errText = await response.text();
+                    let detail = errText;
+                    try { detail = JSON.parse(errText).detail || errText; } catch(e){}
+                    throw new Error(`Lỗi Hệ thống (${response.status}): ${detail}`);
+                }
+
+                const data = await response.json();
+                if (isVideo) {
+                    mediaContainer.innerHTML = `<video src="${window.location.origin}${data.output_video_url}" controls autoplay></video>`;
+                } else if (data.annotated_image_b64) {
+                    mediaContainer.innerHTML = `<img src="data:image/jpeg;base64,${data.annotated_image_b64}" alt="AI Result">`;
+                }
+
+                if (data.annotated_image_b64) delete data.annotated_image_b64;
+                jsonOutput.textContent = JSON.stringify(data, null, 2);
+            }
             resultPanel.style.display = "block";
         } catch (error) {
-            alert("Chạy AI thất bại: \n" + error.message);
+            alert("❌ Chạy AI thất bại:\n\n" + error.message);
         } finally {
             submitBtn.disabled = false;
             loader.style.display = "none";

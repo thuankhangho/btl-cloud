@@ -1,20 +1,5 @@
 """
 YOLOv5 Object Detection Pipeline - config-driven & dataset-agnostic.
-
-Key ideas (matches the "scalable" requirement of the assignment):
-  * Every knob (weights, device, img size, thresholds, class filter, class
-    names, FP16) comes from a YAML config, environment variables or kwargs –
-    nothing is hardcoded for a specific dataset.
-  * `load_model(weights_path)` is generic: any YOLOv5 checkpoint trained on
-    COCO / VisDrone / custom data works unchanged. It uses DetectMultiBackend,
-    so exported models (.onnx, .engine, ...) also work.
-  * Class names are resolved with priority:
-        explicit `names` in config  >  dataset `data.yaml`  >  checkpoint
-    → retraining on a new dataset only requires a new config file.
-  * `Detector` wraps everything for reuse by the FastAPI app and the CLI.
-
-Requirements: torch, torchvision, opencv-python, numpy, pyyaml
-              + ultralytics/yolov5 repo (auto-cloned) and its requirements.
 """
 
 from __future__ import annotations
@@ -32,11 +17,7 @@ import torch
 import yaml
 
 
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
 def load_config(path: Union[str, Path]) -> dict:
-    """Load a YAML config file (empty file → {})."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Config not found: {path}")
@@ -45,7 +26,6 @@ def load_config(path: Union[str, Path]) -> dict:
 
 
 def deep_merge(base: dict, extra: dict) -> dict:
-    """Recursively merge `extra` into `base` (extra wins). Mutates `base`."""
     for k, v in extra.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
             deep_merge(base[k], v)
@@ -55,30 +35,24 @@ def deep_merge(base: dict, extra: dict) -> dict:
 
 
 def default_config() -> dict:
-    """Single source of truth for every default value."""
     return {
         "model": {
-            "weights": "models/best.pt",  # any YOLOv5 weights (.pt/.onnx/...)
-            "device": "auto",             # "cpu" | "cuda" | "0" | "auto"
+            "weights": "models/best.pt",
+            "device": "auto",
             "img_size": 640,
             "conf_thres": 0.25,
             "iou_thres": 0.45,
             "max_det": 300,
-            "classes": None,              # None = all classes, or list of ids
-            "half": False,                # FP16 (GPU only; auto-disabled on CPU)
+            "classes": None,
+            "half": False,
         },
-        "names": None,        # optional override: {0: "person", 1: "car"}
-        "data_yaml": None,    # optional dataset yaml → class names
-        "yolov5_repo": None,  # optional path to yolov5 repo (default ./yolov5)
+        "names": None,
+        "data_yaml": None,
+        "yolov5_repo": None,
     }
 
 
 def apply_env_overrides(cfg: dict) -> dict:
-    """
-    Overlay environment variables on a config dict:
-    YOLOV5_WEIGHTS, YOLOV5_DEVICE, YOLOV5_IMG_SIZE, YOLOV5_CONF,
-    YOLOV5_IOU, YOLOV5_DATA_YAML.
-    """
     m = cfg.setdefault("model", {})
     env = os.getenv
     if env("YOLOV5_WEIGHTS"):
@@ -97,11 +71,6 @@ def apply_env_overrides(cfg: dict) -> dict:
 
 
 def names_from_data_yaml(path: Union[str, Path]) -> Dict[int, str]:
-    """
-    Read {class_id: name} from a YOLOv5 *dataset* yaml (the same file used for
-    training: `names: [...]`, train/val paths...). Swapping datasets = pointing
-    this at another data.yaml – no code change.
-    """
     data = load_config(path)
     names = data.get("names")
     if isinstance(names, (list, tuple)):
@@ -111,17 +80,13 @@ def names_from_data_yaml(path: Union[str, Path]) -> Dict[int, str]:
     raise ValueError(f"No 'names' entry in data yaml: {path}")
 
 
-# ---------------------------------------------------------------------------
-# YOLOv5 repo bootstrap
-# ---------------------------------------------------------------------------
 def ensure_yolov5_repo(root: Optional[str] = None) -> str:
-    """Make the classic ultralytics/yolov5 repo importable (clone if missing)."""
     if root is None:
         root = os.getenv("YOLOV5_REPO") or os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "yolov5"
         )
     if not os.path.isdir(root):
-        print(f"[pipeline] Cloning ultralytics/yolov5 → {root}")
+        print(f"[pipeline] Cloning ultralytics/yolov5 -> {root}")
         code = os.system(
             f'git clone --depth 1 https://github.com/ultralytics/yolov5.git "{root}"'
         )
@@ -136,16 +101,13 @@ def ensure_yolov5_repo(root: Optional[str] = None) -> str:
     return root
 
 
-# ---------------------------------------------------------------------------
-# Model loading (generic – works for any trained YOLOv5 weights)
-# ---------------------------------------------------------------------------
 def _resolve_torch_device(device: Union[str, torch.device] = "auto") -> torch.device:
     s = str(device)
     if s in ("", "auto"):
         s = "cuda" if torch.cuda.is_available() else "cpu"
     if s == "cuda":
         s = "cuda:0"
-    elif s.isdigit():  # "0", "1", ... → GPU ids
+    elif s.isdigit():
         s = f"cuda:{s}"
     return torch.device(s)
 
@@ -160,21 +122,12 @@ def load_model(
     warmup: bool = True,
     img_size: int = 640,
 ):
-    """
-    Load ANY YOLOv5 detection weights (COCO, VisDrone, custom, ONNX export...).
-
-    weights_path : .pt checkpoint (or .onnx / .engine / ... via DetectMultiBackend)
-    device       : "cpu" | "cuda" | "0" | "auto"
-    half         : FP16 inference (applied on CUDA devices only)
-    data         : optional dataset yaml (used to resolve class names when the
-                   weights themselves do not embed them, e.g. some exports)
-    """
     weights_path = os.path.abspath(weights_path)
     if not os.path.isfile(weights_path):
         raise FileNotFoundError(f"Weights not found: {weights_path}")
 
     ensure_yolov5_repo(yolov5_repo)
-    from models.common import DetectMultiBackend  # requires repo on sys.path
+    from models.common import DetectMultiBackend
 
     dev = _resolve_torch_device(device)
     use_half = bool(half) and dev.type == "cuda"
@@ -183,17 +136,16 @@ def load_model(
     try:
         model.eval()
     except Exception:
-        pass  # non-torch backends have nothing to eval
+        pass
     if warmup:
         try:
             model.warmup(imgsz=(1, 3, img_size, img_size))
         except Exception:
-            pass  # warm-up is just an optimisation – never fatal
+            pass
     return model
 
 
 def get_class_names(model, override: Optional[Dict[int, str]] = None) -> Dict[int, str]:
-    """Return {class_id: name}. Priority: explicit override → model.names."""
     if override:
         return {int(k): str(v) for k, v in override.items()}
     names = getattr(model, "names", None)
@@ -206,9 +158,6 @@ def get_class_names(model, override: Optional[Dict[int, str]] = None) -> Dict[in
     return {int(k): str(v) for k, v in names.items()}
 
 
-# ---------------------------------------------------------------------------
-# Preprocess / postprocess (official YOLOv5 semantics)
-# ---------------------------------------------------------------------------
 def letterbox(
     im: np.ndarray,
     new_shape: Union[int, Tuple[int, int]] = 640,
@@ -216,13 +165,7 @@ def letterbox(
     auto: bool = True,
     stride: int = 32,
 ) -> Tuple[np.ndarray, float, Tuple[float, float]]:
-    """
-    Resize + pad (same semantics as yolov5/utils/augmentations.letterbox).
-
-    auto=True → minimal padding to a multiple of `stride` (rectangular
-    inference: faster, less distortion). Returns (img, gain, (dw, dh)).
-    """
-    shape = im.shape[:2]  # (h, w)
+    shape = im.shape[:2]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
 
@@ -230,7 +173,7 @@ def letterbox(
     new_unpad = (int(round(shape[1] * r)), int(round(shape[0] * r)))
     dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
 
-    if auto:  # only pad up to a multiple of stride
+    if auto:
         dw, dh = dw % stride, dh % stride
     dw /= 2
     dh /= 2
@@ -246,7 +189,6 @@ def letterbox(
 def scale_coords(
     img1_shape, coords: np.ndarray, img0_shape, ratio_pad=None
 ) -> np.ndarray:
-    """Rescale xyxy boxes from letterboxed `img1_shape` back to `img0_shape`."""
     if ratio_pad is None:
         gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])
         pad = (
@@ -265,9 +207,6 @@ def scale_coords(
     return coords
 
 
-# ---------------------------------------------------------------------------
-# Inference – image
-# ---------------------------------------------------------------------------
 def predict_image(
     model,
     image_bgr: np.ndarray,
@@ -278,24 +217,12 @@ def predict_image(
     classes: Optional[List[int]] = None,
     names: Optional[Dict[int, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Run detection on a single BGR image (any dataset / any YOLOv5 weights).
-
-    Returns a list of dicts:
-      {"class_id": int, "class_name": str, "confidence": float,
-       "bbox": [x1, y1, x2, y2]}   # absolute pixels on the original image
-    """
     try:
         from utils.general import non_max_suppression
     except ImportError as e:
-        raise ImportError(
-            "Cannot import yolov5 utils – make sure the repo is available "
-            "(pipeline.ensure_yolov5_repo()) and its requirements installed."
-        ) from e
+        raise ImportError("Không tìm thấy yolov5/utils. Đảm bảo đã clone repo yolov5.") from e
 
     h0, w0 = image_bgr.shape[:2]
-
-    # Backend info (works for .pt, .onnx, ... via DetectMultiBackend)
     device = getattr(model, "device", None)
     if device is None:
         try:
@@ -311,7 +238,7 @@ def predict_image(
         stride = int(stride) if stride is not None else 32
 
     img, ratio, (dw, dh) = letterbox(image_bgr, new_shape=img_size, auto=True, stride=stride)
-    img_in = np.ascontiguousarray(img[:, :, ::-1].transpose(2, 0, 1))  # BGR→RGB, HWC→CHW
+    img_in = np.ascontiguousarray(img[:, :, ::-1].transpose(2, 0, 1))
     img_t = torch.from_numpy(img_in).to(device)
     img_t = img_t.half() if fp16 else img_t.float()
     img_t /= 255.0
@@ -320,7 +247,7 @@ def predict_image(
 
     with torch.no_grad():
         pred = model(img_t)
-        if isinstance(pred, (list, tuple)):  # DetectMultiBackend variants
+        if isinstance(pred, (list, tuple)):
             pred = pred[0]
         det = non_max_suppression(
             pred, conf_thres=conf_thres, iou_thres=iou_thres,
@@ -332,7 +259,7 @@ def predict_image(
     if not det or det[0] is None or len(det[0]) == 0:
         return results
 
-    d = det[0].float().cpu().numpy()  # (n, 6): x1 y1 x2 y2 conf cls
+    d = det[0].float().cpu().numpy()
     boxes = scale_coords(img_t.shape[2:], d[:, :4], (h0, w0), ratio_pad=(ratio, (dw, dh)))
 
     for i in range(len(d)):
@@ -346,9 +273,6 @@ def predict_image(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Drawing
-# ---------------------------------------------------------------------------
 _PALETTE = [
     (0, 0, 255), (0, 165, 255), (0, 255, 0), (255, 0, 0),
     (255, 0, 255), (0, 255, 255), (128, 0, 128), (255, 255, 0),
@@ -361,7 +285,6 @@ def draw_detections(
     detections: List[Dict[str, Any]],
     thickness: int = 2,
 ) -> np.ndarray:
-    """Draw boxes + labels on a copy of the image (labels never leave the frame)."""
     canvas = image_bgr.copy()
     h, w = canvas.shape[:2]
     for det in detections:
@@ -375,7 +298,6 @@ def draw_detections(
         label = f'{det["class_name"]} {det["confidence"]:.2f}'
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
 
-        # label above the box; below the top edge if there is no room
         ty = y1 - 4
         if ty - th - 4 < 0:
             ty = y1 + th + 4
@@ -387,9 +309,6 @@ def draw_detections(
     return canvas
 
 
-# ---------------------------------------------------------------------------
-# Inference – video
-# ---------------------------------------------------------------------------
 def predict_video(
     model,
     video_path: str,
@@ -405,26 +324,6 @@ def predict_video(
     max_frames: Optional[int] = None,
     include_detections: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Process a video file frame-by-frame with OpenCV.
-
-    frame_step         : process every Nth frame (1 = all frames)
-    max_frames         : stop after N processed frames (None = whole video)
-    include_detections : False → skip per-frame lists in the result (useful
-                         for long videos; class counts are still returned)
-
-    Returns:
-      {
-        "num_frames": int,               # processed frames
-        "total_frames_in_video": int|None,
-        "fps": float,
-        "frame_step": int,
-        "detections_per_frame": [[...], ...],
-        "class_counts": {class_name: count},
-        "output_path": str | None,
-        "elapsed_sec": float,
-      }
-    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
@@ -442,7 +341,7 @@ def predict_video(
         os.makedirs(out_dir, exist_ok=True)
         ext = os.path.splitext(output_path)[1].lower()
         candidates = ("mp4v", "XVID") if ext in (".mp4", ".mov") else ("XVID", "mp4v")
-        writer_fps = fps / frame_step if frame_step > 1 else fps  # keep real duration
+        writer_fps = fps / frame_step if frame_step > 1 else fps
         for cc in candidates:
             w = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*cc),
                                 writer_fps, (width, height))
@@ -500,17 +399,7 @@ def predict_video(
     }
 
 
-# ---------------------------------------------------------------------------
-# High-level, config-driven wrapper (used by the API and the CLI)
-# ---------------------------------------------------------------------------
 class Detector:
-    """
-    Usage:
-        det = Detector.from_config("configs/visdrone.yaml")
-        results = det.predict_image(bgr_image)
-        annotated = det.draw(bgr_image, results)
-    """
-
     def __init__(self, model, cfg: dict, names: Optional[Dict[int, str]] = None):
         self.model = model
         self.cfg = cfg
@@ -519,18 +408,16 @@ class Detector:
         self.conf_thres = float(m.get("conf_thres", 0.25))
         self.iou_thres = float(m.get("iou_thres", 0.45))
         self.max_det = int(m.get("max_det", 300))
-        self.classes = m.get("classes")          # list[int] | None
+        self.classes = m.get("classes")
         self.names = names if names is not None else get_class_names(model)
 
-    # -- constructors ------------------------------------------------------
     @classmethod
     def from_config(cls, config_path: Union[str, Path, None] = None, **overrides):
-        """Build from a YAML config file (+ optional keyword overrides)."""
         cfg = default_config()
         if config_path and Path(config_path).is_file():
             deep_merge(cfg, load_config(config_path))
         elif config_path:
-            print(f"[pipeline] NOTE: config '{config_path}' not found – using defaults")
+            print(f"[pipeline] NOTE: config '{config_path}' not found -> using defaults")
         apply_env_overrides(cfg)
 
         m = cfg.setdefault("model", {})
@@ -546,11 +433,9 @@ class Detector:
 
     @classmethod
     def from_cfg(cls, cfg: dict) -> "Detector":
-        """Build from an already-merged config dict (used by the FastAPI app)."""
         cfg = copy.deepcopy(cfg)
         m = cfg.setdefault("model", {})
 
-        # Resolve data_yaml (optional) to an absolute path when possible
         data_yaml = cfg.get("data_yaml")
         if data_yaml:
             if not os.path.isabs(data_yaml):
@@ -559,8 +444,6 @@ class Detector:
                     data_yaml = alt
                     cfg["data_yaml"] = alt
             if not os.path.isfile(data_yaml):
-                print(f"[pipeline] WARNING: data_yaml not found ({data_yaml}); "
-                      "class names will be taken from the checkpoint")
                 data_yaml = None
 
         model = load_model(
@@ -572,17 +455,14 @@ class Detector:
             img_size=int(m.get("img_size", 640)),
         )
 
-        # Class names: explicit override > data.yaml > checkpoint
         names_override = cfg.get("names") or (names_from_data_yaml(data_yaml) if data_yaml else None)
         return cls(model, cfg, names=get_class_names(model, override=names_override))
 
-    # -- helpers -----------------------------------------------------------
     @property
     def weights(self) -> str:
         return self.cfg.get("model", {}).get("weights", "")
 
     def info(self) -> dict:
-        """Metadata – handy to prove which dataset a model was trained on."""
         backend = "pytorch"
         for attr, name in (("onnx", "onnx"), ("engine", "tensorrt"), ("xml", "openvino"),
                            ("saved_model", "tf-saved_model"), ("pb", "tf-graphdef"),
@@ -604,7 +484,6 @@ class Detector:
             "names": self.names,
         }
 
-    # -- inference ---------------------------------------------------------
     def predict_image(self, image_bgr: np.ndarray, **kw) -> List[Dict[str, Any]]:
         return predict_image(
             self.model, image_bgr,
@@ -633,41 +512,3 @@ class Detector:
 
     def draw(self, image_bgr: np.ndarray, detections: List[Dict[str, Any]]) -> np.ndarray:
         return draw_detections(image_bgr, detections)
-
-
-# ---------------------------------------------------------------------------
-# CLI smoke test (no API server needed)
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import argparse
-    import json as _json
-
-    ap = argparse.ArgumentParser(description="YOLOv5 inference – config driven")
-    ap.add_argument("--config", default="configs/default.yaml")
-    ap.add_argument("--weights", default=None, help="Override weights path")
-    ap.add_argument("--image", default=None, help="Input image")
-    ap.add_argument("--video", default=None, help="Input video")
-    ap.add_argument("--save", default=None, help="Save annotated output here")
-    ap.add_argument("--conf", type=float, default=None)
-    args = ap.parse_args()
-
-    overrides = {k: v for k, v in
-                 {"weights": args.weights, "conf_thres": args.conf}.items() if v is not None}
-    det = Detector.from_config(args.config, **overrides)
-
-    if args.image:
-        img = cv2.imread(args.image)
-        if img is None:
-            raise SystemExit(f"Cannot read image: {args.image}")
-        results = det.predict_image(img)
-        print(_json.dumps(det.info(), indent=2, default=str))
-        for r in results:
-            print(r)
-        if args.save:
-            cv2.imwrite(args.save, det.draw(img, results))
-            print(f"saved → {args.save}")
-    elif args.video:
-        summary = det.predict_video(args.video, output_path=args.save)
-        print({k: v for k, v in summary.items() if k != "detections_per_frame"})
-    else:
-        print(_json.dumps(det.info(), indent=2, default=str))

@@ -1,5 +1,5 @@
 model:
   weights: models/board_detection.pt
-  device: auto
-  img_size: 1280        # vật thể nhỏ trên ảnh drone → dùng đúng kích thước lúc train
-  conf_thres: 0.25
+  img_size: 960
+  conf_thres: 0.15
+  iou_thres: 0.45
